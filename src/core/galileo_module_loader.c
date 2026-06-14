@@ -68,6 +68,14 @@ typedef struct DynamicModuleInfo {
     struct DynamicModuleInfo* next;    /* Linked list for hash table */
 } DynamicModuleInfo;
 
+/* All module-specific *_module_info structs share this public prefix. */
+typedef struct {
+    const char* name;
+    const char* version;
+    int (*init_func)(void);
+    void (*cleanup_func)(void);
+} ModuleDescriptor;
+
 /* Module registry state */
 static struct {
     DynamicModuleInfo* modules[MODULE_HASH_SIZE];  /* Hash table of modules */
@@ -296,15 +304,32 @@ static int load_module_dynamic(DynamicModuleInfo* module) {
     if (!info_ptr) {
         printf("⚠️  Module '%s' doesn't export '%s', trying alternative symbols\n", 
                module->name, info_symbol);
+    } else {
+        const ModuleDescriptor* descriptor = (const ModuleDescriptor*)info_ptr;
+        module->init_func = descriptor->init_func;
+        module->cleanup_func = descriptor->cleanup_func;
+
+        if (descriptor->version) {
+            size_t ver_len = strlen(descriptor->version);
+            if (ver_len >= sizeof(module->version)) {
+                ver_len = sizeof(module->version) - 1;
+            }
+            memcpy(module->version, descriptor->version, ver_len);
+            module->version[ver_len] = '\0';
+        }
     }
     
-    /* Look for standard module interface functions */
+    /* Look for standard module interface functions as a plugin fallback. */
     char init_symbol[128], cleanup_symbol[128];
     snprintf(init_symbol, sizeof(init_symbol), "%s_module_init", module->name);
     snprintf(cleanup_symbol, sizeof(cleanup_symbol), "%s_module_cleanup", module->name);
     
-    module->init_func = (int (*)(void))dlsym(module->handle, init_symbol);
-    module->cleanup_func = (void (*)(void))dlsym(module->handle, cleanup_symbol);
+    if (!module->init_func) {
+        module->init_func = (int (*)(void))dlsym(module->handle, init_symbol);
+    }
+    if (!module->cleanup_func) {
+        module->cleanup_func = (void (*)(void))dlsym(module->handle, cleanup_symbol);
+    }
     
     /* Look for version function */
     char version_symbol[128];
@@ -327,7 +352,7 @@ static int load_module_dynamic(DynamicModuleInfo* module) {
     }
     
     /* Get version info if available */
-    if (module->get_version) {
+    if (!module->version[0] && module->get_version) {
         const char* version = module->get_version();
         if (version) {
             size_t ver_len = strlen(version);

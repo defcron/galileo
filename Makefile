@@ -48,13 +48,9 @@ UTILS_SOURCES = $(SRC_DIR)/utils/galileo_utils.c
 HEURISTIC_SOURCES = $(SRC_DIR)/heuristic/galileo_heuristic_compiler.c
 MAIN_SOURCES = $(SRC_DIR)/main/galileo_main.c
 
-# Test sources
-TEST_SOURCES = $(TEST_DIR)/test_core.c \
-               $(TEST_DIR)/test_graph.c \
-               $(TEST_DIR)/test_symbolic.c \
-               $(TEST_DIR)/test_memory.c \
-               $(TEST_DIR)/test_integration.c \
-               $(TEST_DIR)/test_runner.c
+# Test sources. If no standalone C tests are present, `make test` falls back
+# to the CLI integration smoke suite.
+TEST_SOURCES = $(wildcard $(TEST_DIR)/*.c)
 
 # Object files
 CORE_OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(CORE_SOURCES))
@@ -218,9 +214,13 @@ release: clean all symlinks
 
 # Run tests (static linking for comprehensive testing)
 .PHONY: test
+ifeq ($(strip $(TEST_SOURCES)),)
+test: test-integration
+else
 test: $(TEST_EXECUTABLE)
 	@echo "$(BLUE)🧪 Running test suite (with static module linking)...$(NC)"
 	@export LD_LIBRARY_PATH=$(shell pwd)/$(BUILD_LIB_DIR):$LD_LIBRARY_PATH && ./$(TEST_EXECUTABLE)
+endif
 
 # Run integration tests with main executable (no LD_LIBRARY_PATH!)
 .PHONY: test-integration  

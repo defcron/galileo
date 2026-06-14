@@ -373,6 +373,44 @@ static void apply_transitivity_reasoning(GalileoModel* model) {
             
             SymbolicFact* fact1 = &model->facts[i];
             SymbolicFact* fact2 = &model->facts[j];
+
+            if (strings_equivalent(fact1->relation, "is_a") &&
+                strings_equivalent(fact2->relation, "subclass_of") &&
+                strings_equivalent(fact1->object, fact2->subject) &&
+                !strings_equivalent(fact1->subject, fact2->object) &&
+                fact1->confidence > 0.3f && fact2->confidence > 0.3f) {
+                if (!fact_exists(model, fact1->subject, "is_a", fact2->object)) {
+                    float new_confidence = fact1->confidence * fact2->confidence * 0.8f;
+                    int supporting_nodes[] = {fact1->supporting_nodes[0], fact2->supporting_nodes[0]};
+                    galileo_add_enhanced_fact_safe(model, fact1->subject, "is_a",
+                                                  fact2->object, new_confidence, supporting_nodes, 2);
+                    facts_added++;
+
+                    printf("🔗 Syllogism: %s is_a %s + %s subclass_of %s => %s is_a %s\n",
+                           fact1->subject, fact1->object,
+                           fact2->subject, fact2->object,
+                           fact1->subject, fact2->object);
+                }
+            }
+
+            if (strings_equivalent(fact1->relation, "subclass_of") &&
+                strings_equivalent(fact2->relation, "subclass_of") &&
+                strings_equivalent(fact1->object, fact2->subject) &&
+                !strings_equivalent(fact1->subject, fact2->object) &&
+                fact1->confidence > 0.3f && fact2->confidence > 0.3f) {
+                if (!fact_exists(model, fact1->subject, "subclass_of", fact2->object)) {
+                    float new_confidence = fact1->confidence * fact2->confidence * 0.8f;
+                    int supporting_nodes[] = {fact1->supporting_nodes[0], fact2->supporting_nodes[0]};
+                    galileo_add_enhanced_fact_safe(model, fact1->subject, "subclass_of",
+                                                  fact2->object, new_confidence, supporting_nodes, 2);
+                    facts_added++;
+
+                    printf("🔗 Class chain: %s subclass_of %s + %s subclass_of %s => %s subclass_of %s\n",
+                           fact1->subject, fact1->object,
+                           fact2->subject, fact2->object,
+                           fact1->subject, fact2->object);
+                }
+            }
             
             /* Check for transitivity pattern: A rel B, B rel C => A rel C */
             if (strings_equivalent(fact1->object, fact2->subject) &&

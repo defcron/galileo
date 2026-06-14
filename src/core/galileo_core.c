@@ -244,36 +244,37 @@ uint32_t enhanced_hash(const char* str) {
  * =============================================================================
  */
 
+static int core_ensure_module_loaded(const char* module_name) {
+    if (galileo_is_module_loaded(module_name)) {
+        return 0;
+    }
+
+    return galileo_load_module(module_name);
+}
+
+static int core_add_graph_edge(GalileoModel* model, int src, int dst, EdgeType type, float weight) {
+    if (core_ensure_module_loaded("graph") != 0) {
+        return -1;
+    }
+
+    typedef int (*add_edge_func_t)(GalileoModel*, int, int, EdgeType, float);
+    add_edge_func_t add_edge = (add_edge_func_t)get_module_function("graph", "galileo_add_edge_safe");
+    if (!add_edge) {
+        return -1;
+    }
+
+    return add_edge(model, src, dst, type, weight);
+}
+
 /* Get a function pointer from a loaded module */
 void* get_module_function(const char* module_name, const char* function_name) {
     /* Check if module is loaded */
     if (!galileo_is_module_loaded(module_name)) {
         return NULL;
     }
-    
-    /* Get the module handle directly using dlopen with RTLD_NOLOAD */
-    char module_path[512];
-    snprintf(module_path, sizeof(module_path), "./build/lib/galileo/libgalileo_%s.so", module_name);
-    
-    void* module_handle = dlopen(module_path, RTLD_LAZY | RTLD_NOLOAD);
-    if (!module_handle) {
-        /* Try with absolute path construction */
-        char* cwd = getcwd(NULL, 0);
-        if (cwd) {
-            snprintf(module_path, sizeof(module_path), "%s/build/lib/galileo/libgalileo_%s.so", cwd, module_name);
-            module_handle = dlopen(module_path, RTLD_LAZY | RTLD_NOLOAD);
-            free(cwd);
-        }
-        
-        if (!module_handle) {
-            fprintf(stderr, "⚠️  Could not get handle for module '%s': %s\n", 
-                    module_name, dlerror());
-            return NULL;
-        }
-    }
-    
-    /* Get the function pointer */
-    void* func_ptr = dlsym(module_handle, function_name);
+
+    /* Ask the module loader for the symbol from its registered handle. */
+    void* func_ptr = galileo_get_module_symbol(module_name, function_name);
     if (!func_ptr) {
         fprintf(stderr, "⚠️  Function '%s' not found in module '%s': %s\n", 
                 function_name, module_name, dlerror());
@@ -295,7 +296,7 @@ void* get_module_function(const char* module_name, const char* function_name) {
 /* Safe wrapper to call graph module functions with lazy loading */
 int call_graph_function_lazy(const char* function_name, GalileoModel* model) {
     /* Try to ensure graph module is loaded */
-    if (ensure_module_loaded("graph") != 0) {
+    if (core_ensure_module_loaded("graph") != 0) {
         return 0;  /* Module not available */
     }
     
@@ -313,7 +314,7 @@ int call_graph_function_lazy(const char* function_name, GalileoModel* model) {
 /* Safe wrapper to call symbolic module functions with lazy loading */
 int call_symbolic_function_lazy(const char* function_name, GalileoModel* model) {
     /* Try to ensure symbolic module is loaded */
-    if (ensure_module_loaded("symbolic") != 0) {
+    if (core_ensure_module_loaded("symbolic") != 0) {
         return 0;  /* Module not available */
     }
     
@@ -331,7 +332,7 @@ int call_symbolic_function_lazy(const char* function_name, GalileoModel* model) 
 /* Safe wrapper to call memory module functions with lazy loading */
 int call_memory_function_lazy(const char* function_name, GalileoModel* model) {
     /* Try to ensure memory module is loaded */
-    if (ensure_module_loaded("memory") != 0) {
+    if (core_ensure_module_loaded("memory") != 0) {
         return 0;  /* Module not available */
     }
     
@@ -350,7 +351,7 @@ int call_memory_function_lazy(const char* function_name, GalileoModel* model) {
 int call_heuristic_function_lazy(const char* function_name, GalileoModel* model, 
                                 char tokens[][MAX_TOKEN_LEN], int num_tokens) {
     /* Try to ensure heuristic module is loaded */
-    if (ensure_module_loaded("heuristic") != 0) {
+    if (core_ensure_module_loaded("heuristic") != 0) {
         return 0;  /* Module not available */
     }
     
@@ -358,7 +359,8 @@ int call_heuristic_function_lazy(const char* function_name, GalileoModel* model,
     heuristic_func_t func = (heuristic_func_t)get_module_function("heuristic", function_name);
     
     if (func) {
-        return func(model, tokens, num_tokens);
+        func(model, tokens, num_tokens);
+        return 1;  /* Function was available and ran */
     }
     
     return 0;  /* Function not available */
@@ -367,7 +369,7 @@ int call_heuristic_function_lazy(const char* function_name, GalileoModel* model,
 /* Safe wrapper to call utils module functions with lazy loading */
 int call_utils_function_lazy(const char* function_name, GalileoModel* model) {
     /* Try to ensure utils module is loaded */
-    if (ensure_module_loaded("utils") != 0) {
+    if (core_ensure_module_loaded("utils") != 0) {
         return 0;  /* Module not available */
     }
     
@@ -389,23 +391,23 @@ int call_utils_function_lazy(const char* function_name, GalileoModel* model) {
 
 /* Check if specific modules are available for use */
 int galileo_has_graph_module(void) {
-    return galileo_is_module_loaded("graph") || (ensure_module_loaded("graph") == 0);
+    return galileo_is_module_loaded("graph") || (core_ensure_module_loaded("graph") == 0);
 }
 
 int galileo_has_symbolic_module(void) {
-    return galileo_is_module_loaded("symbolic") || (ensure_module_loaded("symbolic") == 0);
+    return galileo_is_module_loaded("symbolic") || (core_ensure_module_loaded("symbolic") == 0);
 }
 
 int galileo_has_memory_module(void) {
-    return galileo_is_module_loaded("memory") || (ensure_module_loaded("memory") == 0);
+    return galileo_is_module_loaded("memory") || (core_ensure_module_loaded("memory") == 0);
 }
 
 int galileo_has_heuristic_module(void) {
-    return galileo_is_module_loaded("heuristic") || (ensure_module_loaded("heuristic") == 0);
+    return galileo_is_module_loaded("heuristic") || (core_ensure_module_loaded("heuristic") == 0);
 }
 
 int galileo_has_utils_module(void) {
-    return galileo_is_module_loaded("utils") || (ensure_module_loaded("utils") == 0);
+    return galileo_is_module_loaded("utils") || (core_ensure_module_loaded("utils") == 0);
 }
 
 /* =============================================================================
@@ -450,6 +452,7 @@ GalileoModel* galileo_init(void) {
     model->global_node_idx = 0;
     GraphNode* global_node = &model->nodes[0];
     global_node->node_id = 0;
+    global_node->type = NODE_GLOBAL;
     global_node->active = 1;
     global_node->is_global = 1;
     global_node->is_summary = 0;
@@ -457,10 +460,13 @@ GalileoModel* galileo_init(void) {
     global_node->last_accessed_iteration = 0;
     global_node->compression_level = 0;
     safe_strcpy(global_node->token_text, "<GLOBAL>", MAX_TOKEN_LEN);
+    safe_strcpy(global_node->token, "<GLOBAL>", MAX_TOKEN_LEN);
     
     /* Initialize global node embeddings with enhanced random distribution */
     for (int i = 0; i < EMBEDDING_DIM; i++) {
-        global_node->identity_embedding[i] = random_float_range() * 0.1f;
+        float base_val = random_float_range() * 0.1f;
+        global_node->embedding[i] = base_val;
+        global_node->identity_embedding[i] = base_val;
         global_node->context_embedding[i] = random_float_range() * 0.1f;
         global_node->temporal_embedding[i] = random_float_range() * 0.1f;
     }
@@ -548,18 +554,6 @@ int galileo_add_token(GalileoModel* model, const char* token_text) {
         return -1;
     }
     
-    /* Check if token already exists with enhanced search */
-    for (int i = 1; i < model->num_nodes; i++) {  /* Skip global node */
-        if (model->nodes[i].active && 
-            !model->nodes[i].is_summary && 
-            !model->nodes[i].is_global &&
-            strcmp(model->nodes[i].token_text, token_text) == 0) {
-            /* Update access time for existing token */
-            model->nodes[i].last_accessed_iteration = model->current_iteration;
-            return i;  /* Token already exists */
-        }
-    }
-    
     /* Create new token node with enhanced initialization */
     int node_idx = model->num_nodes++;
     GraphNode* node = &model->nodes[node_idx];
@@ -569,7 +563,9 @@ int galileo_add_token(GalileoModel* model, const char* token_text) {
     
     /* Initialize node properties */
     safe_strcpy(node->token_text, token_text, MAX_TOKEN_LEN);
+    safe_strcpy(node->token, token_text, MAX_TOKEN_LEN);
     node->node_id = node_idx;
+    node->type = NODE_TOKEN;
     node->active = 1;
     node->is_summary = 0;
     node->is_global = 0;
@@ -577,36 +573,53 @@ int galileo_add_token(GalileoModel* model, const char* token_text) {
     node->last_accessed_iteration = model->current_iteration;
     node->compression_level = 0;
     node->attention_centrality = 0.0f;
-    
-    /* Initialize embeddings with enhanced random distribution */
-    for (int i = 0; i < EMBEDDING_DIM; i++) {
-        float base_val = random_float_range() * 0.1f;
-        node->identity_embedding[i] = base_val;
-        node->context_embedding[i] = base_val * 0.8f;  /* Correlated but different */
-        node->temporal_embedding[i] = base_val * 0.6f;
-    }
-    
-    /* Enhanced vocabulary management with 19-year tracking */
-    int vocab_found = 0;
+
+    int vocab_index = -1;
     for (int i = 0; i < model->vocab_size; i++) {
         if (strcmp(model->vocabulary[i].token, token_text) == 0) {
             model->vocabulary[i].frequency++;
             model->vocabulary[i].node_id = node_idx;  /* Update to latest node */
-            vocab_found = 1;
+            model->vocabulary[i].contexts_seen++;
+            vocab_index = i;
             break;
         }
     }
     
-    if (!vocab_found && model->vocab_size < MAX_VOCAB_SIZE) {
-        VocabEntry* entry = &model->vocabulary[model->vocab_size];
+    if (vocab_index < 0 && model->vocab_size < MAX_VOCAB_SIZE) {
+        vocab_index = model->vocab_size++;
+        VocabEntry* entry = &model->vocabulary[vocab_index];
         safe_strcpy(entry->token, token_text, MAX_TOKEN_LEN);
         entry->frequency = 1;
         entry->node_id = node_idx;
         entry->importance = 0.5f;
         entry->first_seen_time = time(NULL);  /* RESTORED: For 19-year cache eviction strategy */
-        model->vocab_size++;
-    } else if (!vocab_found) {
+
+        uint32_t hash = enhanced_hash(token_text);
+        for (int i = 0; i < EMBEDDING_DIM; i++) {
+            uint32_t seed = hash + (uint32_t)(i * 31) + (uint32_t)(node_idx * 17);
+            seed = seed * 1103515245u + 12345u;
+            entry->embedding[i] = ((float)(seed % 10000u) / 10000.0f - 0.5f) * 0.2f;
+        }
+        entry->contexts_seen = 1;
+        entry->context_variance = 0.0f;
+    } else if (vocab_index < 0) {
         fprintf(stderr, "⚠️  Warning: Vocabulary full, cannot add '%s'\n", token_text);
+    }
+
+    if (vocab_index >= 0) {
+        VocabEntry* entry = &model->vocabulary[vocab_index];
+        vector_copy(node->embedding, entry->embedding, EMBEDDING_DIM);
+        vector_copy(node->identity_embedding, entry->embedding, EMBEDDING_DIM);
+        vector_zero(node->context_embedding, EMBEDDING_DIM);
+        vector_zero(node->temporal_embedding, EMBEDDING_DIM);
+    } else {
+        for (int i = 0; i < EMBEDDING_DIM; i++) {
+            float base_val = random_float_range() * 0.1f;
+            node->embedding[i] = base_val;
+            node->identity_embedding[i] = base_val;
+            node->context_embedding[i] = 0.0f;
+            node->temporal_embedding[i] = 0.0f;
+        }
     }
     
     return node_idx;
@@ -698,6 +711,7 @@ void galileo_compute_graph_stats(GalileoModel* model) {
             case EDGE_SIMILARITY: similarity_edges++; break;
             case EDGE_ATTENTION: attention_edges++; break;
             case EDGE_SEMANTIC: semantic_edges++; break;
+            case EDGE_SEQUENTIAL: sequence_edges++; break;
             case EDGE_SEQUENCE: sequence_edges++; break;
             case EDGE_GLOBAL: global_edges++; break;
             default: other_edges++; break;
@@ -812,14 +826,36 @@ void galileo_process_sequence(GalileoModel* model, char tokens[][MAX_TOKEN_LEN],
     printf("\n🚀 === Enhanced Galileo v42 Processing %d tokens ===\n", num_tokens);
     
     /* Phase 1: Add all tokens to the graph (core functionality) */
+    int* token_nodes = calloc((size_t)num_tokens, sizeof(int));
+    if (!token_nodes) {
+        fprintf(stderr, "❌ Failed to allocate token node map\n");
+        return;
+    }
+
     for (int i = 0; i < num_tokens; i++) {
         int node_idx = galileo_add_token(model, tokens[i]);
+        token_nodes[i] = node_idx;
         if (node_idx >= 0) {
             printf("📝 Added token '%s' as node %d (importance: %.2f)\n", 
                    tokens[i], node_idx, model->nodes[node_idx].importance_score);
         }
     }
     printf("📝 All tokens added to graph.\n");
+
+    for (int i = 0; i < num_tokens; i++) {
+        if (token_nodes[i] < 0) {
+            continue;
+        }
+
+        if (i > 0 && token_nodes[i - 1] >= 0) {
+            core_add_graph_edge(model, token_nodes[i - 1], token_nodes[i], EDGE_SEQUENTIAL, 1.0f);
+        }
+
+        float global_weight = 0.3f + 0.2f * random_float();
+        core_add_graph_edge(model, token_nodes[i], model->global_node_idx, EDGE_GLOBAL, global_weight);
+    }
+
+    free(token_nodes);
     
     /* Phase 2: Iterative processing with lazy-loaded modules */
     for (int iter = 0; iter < model->max_iterations; iter++) {
@@ -831,6 +867,12 @@ void galileo_process_sequence(GalileoModel* model, char tokens[][MAX_TOKEN_LEN],
             printf("📡 Running message passing (graph module)...\n");
         } else {
             printf("⏭️  Skipping message passing (graph module not available)\n");
+        }
+
+        if (iter % 2 == 0) {
+            if (call_graph_function_lazy("galileo_attention_based_edge_addition_optimized", model)) {
+                printf("🔗 Running dynamic edge addition (graph module)...\n");
+            }
         }
         
         /* Try to use symbolic module for reasoning */
@@ -861,6 +903,10 @@ void galileo_process_sequence(GalileoModel* model, char tokens[][MAX_TOKEN_LEN],
         /* Compute statistics (core functionality) */
         if (iter % 3 == 0) {  /* Every 3rd iteration */
             galileo_compute_graph_stats(model);
+        }
+
+        if (iter % 4 == 0) {
+            call_graph_function_lazy("galileo_prune_weak_edges", model);
         }
     }
     

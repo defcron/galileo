@@ -31,6 +31,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <ctype.h>
 #include <sqlite3.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -196,7 +197,7 @@ static void init_population(GeneticAlgorithm* ga, int num_tokens) {
 
 /* Mutation operator */
 static void mutate(FactChromosome* chromo, int num_tokens) {
-    if ((float)rand() / RAND_MAX < GA_MUTATION_RATE) {
+    if ((double)rand() / (double)RAND_MAX < (double)GA_MUTATION_RATE) {
         /* Randomly change one role assignment */
         int role = rand() % 3;
         int new_idx;
@@ -537,6 +538,229 @@ void destroy_heuristic_compiler(HeuristicCompiler* compiler) {
     free(compiler);
 }
 
+static int token_equals(const char* token, const char* expected) {
+    if (!token || !expected) return 0;
+
+    while (*token && *expected) {
+        if (tolower((unsigned char)*token) != tolower((unsigned char)*expected)) {
+            return 0;
+        }
+        token++;
+        expected++;
+    }
+
+    return *token == '\0' && *expected == '\0';
+}
+
+static int token_is_be(const char* token) {
+    return token_equals(token, "is") || token_equals(token, "are") ||
+           token_equals(token, "was") || token_equals(token, "were");
+}
+
+static int token_is_lowercase_be(const char* token) {
+    return token && islower((unsigned char)token[0]) && token_is_be(token);
+}
+
+static int token_is_article(const char* token) {
+    return token_equals(token, "a") || token_equals(token, "an") || token_equals(token, "the");
+}
+
+static int token_is_query_word(const char* token) {
+    return token_equals(token, "is") || token_equals(token, "are") ||
+           token_equals(token, "what") || token_equals(token, "who") ||
+           token_equals(token, "where") || token_equals(token, "when") ||
+           token_equals(token, "why") || token_equals(token, "how");
+}
+
+static void canonical_class_token(const char* input, char* output, size_t output_size) {
+    if (!output || output_size == 0) return;
+    output[0] = '\0';
+    if (!input) return;
+
+    size_t len = strlen(input);
+    if (len >= output_size) len = output_size - 1;
+
+    for (size_t i = 0; i < len; i++) {
+        output[i] = (char)tolower((unsigned char)input[i]);
+    }
+    output[len] = '\0';
+
+    if (strcmp(output, "men") == 0) {
+        strncpy(output, "man", output_size - 1);
+        output[output_size - 1] = '\0';
+        return;
+    }
+    if (strcmp(output, "women") == 0) {
+        strncpy(output, "woman", output_size - 1);
+        output[output_size - 1] = '\0';
+        return;
+    }
+
+    len = strlen(output);
+    if (len > 3 && strcmp(output + len - 3, "ies") == 0) {
+        output[len - 3] = 'y';
+        output[len - 2] = '\0';
+    } else if (len > 3 && output[len - 1] == 's' && output[len - 2] == 'e' &&
+               (output[len - 3] == 'h' || output[len - 3] == 'x' ||
+                output[len - 3] == 's' || output[len - 3] == 'z')) {
+        output[len - 2] = '\0';
+    } else if (len > 1 && output[len - 1] == 's') {
+        output[len - 1] = '\0';
+    }
+}
+
+static int fact_matches_ci(const SymbolicFact* fact, const char* subject,
+                           const char* relation, const char* object) {
+    return token_equals(fact->subject, subject) &&
+           token_equals(fact->relation, relation) &&
+           token_equals(fact->object, object);
+}
+
+static int add_extracted_fact(GalileoModel* model, const char* subject, const char* relation,
+                              const char* object, float confidence) {
+    if (!model || !subject || !relation || !object || model->num_facts >= MAX_FACTS) {
+        return 0;
+    }
+
+    for (int i = 0; i < model->num_facts; i++) {
+        if (fact_matches_ci(&model->facts[i], subject, relation, object)) {
+            if (confidence > model->facts[i].confidence) {
+                model->facts[i].confidence = confidence;
+            }
+            return 0;
+        }
+    }
+
+    SymbolicFact* fact = &model->facts[model->num_facts++];
+    memset(fact, 0, sizeof(*fact));
+    strncpy(fact->subject, subject, sizeof(fact->subject) - 1);
+    strncpy(fact->relation, relation, sizeof(fact->relation) - 1);
+    strncpy(fact->object, object, sizeof(fact->object) - 1);
+    fact->confidence = confidence;
+    fact->iteration_added = model->current_iteration;
+    fact->derivation_depth = 0;
+
+    printf("📋 Extracted deterministic fact: %s %s %s (confidence: %.2f)\n",
+           fact->subject, fact->relation, fact->object, fact->confidence);
+    return 1;
+}
+
+static int extract_deterministic_facts(GalileoModel* model, char tokens[][MAX_TOKEN_LEN], int num_tokens) {
+    int facts_extracted = 0;
+    int patterns_seen = 0;
+    char last_capability_object[MAX_TOKEN_LEN] = "";
+
+    for (int i = 0; i < num_tokens; i++) {
+        if ((token_equals(tokens[i], "all") || token_equals(tokens[i], "most")) && i + 3 < num_tokens) {
+            char subject[MAX_TOKEN_LEN];
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i + 1], subject, sizeof(subject));
+            canonical_class_token(tokens[i + 3], object, sizeof(object));
+
+            if (token_is_be(tokens[i + 2])) {
+                const char* relation = token_equals(tokens[i], "all") ? "subclass_of" : "mostly";
+                float confidence = token_equals(tokens[i], "all") ? 1.0f : 0.8f;
+                patterns_seen++;
+                facts_extracted += add_extracted_fact(model, subject, relation, object, confidence);
+                continue;
+            }
+
+            if (token_equals(tokens[i + 2], "can")) {
+                strncpy(last_capability_object, object, sizeof(last_capability_object) - 1);
+                last_capability_object[sizeof(last_capability_object) - 1] = '\0';
+                patterns_seen++;
+                facts_extracted += add_extracted_fact(model, subject, "can", object,
+                                                      token_equals(tokens[i], "all") ? 1.0f : 0.8f);
+                continue;
+            }
+        }
+
+        if (!token_is_query_word(tokens[i]) && i + 3 < num_tokens &&
+            token_is_lowercase_be(tokens[i + 1]) && token_is_article(tokens[i + 2])) {
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i + 3], object, sizeof(object));
+            patterns_seen++;
+            facts_extracted += add_extracted_fact(model, tokens[i], "is_a", object, 1.0f);
+            continue;
+        }
+
+        if (!token_is_query_word(tokens[i]) && i + 2 < num_tokens && token_is_lowercase_be(tokens[i + 1]) &&
+            !token_is_article(tokens[i + 2]) &&
+            (i == 0 || (!token_equals(tokens[i - 1], "all") && !token_equals(tokens[i - 1], "most")))) {
+            char subject[MAX_TOKEN_LEN];
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i], subject, sizeof(subject));
+            canonical_class_token(tokens[i + 2], object, sizeof(object));
+
+            patterns_seen++;
+            if (token_equals(tokens[i + 1], "are")) {
+                facts_extracted += add_extracted_fact(model, subject, "subclass_of", object, 1.0f);
+            } else {
+                facts_extracted += add_extracted_fact(model, tokens[i], "is_a", object, 1.0f);
+            }
+            continue;
+        }
+
+        if (i + 2 < num_tokens && token_equals(tokens[i + 1], "can")) {
+            char subject[MAX_TOKEN_LEN];
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i], subject, sizeof(subject));
+            canonical_class_token(tokens[i + 2], object, sizeof(object));
+            strncpy(last_capability_object, object, sizeof(last_capability_object) - 1);
+            last_capability_object[sizeof(last_capability_object) - 1] = '\0';
+            patterns_seen++;
+            facts_extracted += add_extracted_fact(model, subject, "can", object, 1.0f);
+            continue;
+        }
+
+        if (i + 2 < num_tokens &&
+            (token_equals(tokens[i + 1], "cannot") || token_equals(tokens[i + 1], "can't"))) {
+            char subject[MAX_TOKEN_LEN];
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i], subject, sizeof(subject));
+            canonical_class_token(tokens[i + 2], object, sizeof(object));
+            patterns_seen++;
+            facts_extracted += add_extracted_fact(model, subject, "cannot", object, 1.0f);
+            continue;
+        }
+
+        if (i + 3 < num_tokens && token_equals(tokens[i + 1], "and") &&
+            (token_equals(tokens[i + 3], "cannot") || token_equals(tokens[i + 3], "can't")) &&
+            last_capability_object[0]) {
+            char subject1[MAX_TOKEN_LEN];
+            char subject2[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i], subject1, sizeof(subject1));
+            canonical_class_token(tokens[i + 2], subject2, sizeof(subject2));
+            patterns_seen++;
+            facts_extracted += add_extracted_fact(model, subject1, "cannot", last_capability_object, 1.0f);
+            facts_extracted += add_extracted_fact(model, subject2, "cannot", last_capability_object, 1.0f);
+            continue;
+        }
+
+        if (i + 4 < num_tokens && token_equals(tokens[i + 1], "and") &&
+            token_is_lowercase_be(tokens[i + 3])) {
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i + 4], object, sizeof(object));
+            patterns_seen++;
+            facts_extracted += add_extracted_fact(model, tokens[i], "is_a", object, 1.0f);
+            facts_extracted += add_extracted_fact(model, tokens[i + 2], "is_a", object, 1.0f);
+            continue;
+        }
+
+        if (i + 2 < num_tokens &&
+            (token_equals(tokens[i + 1], "causes") || token_equals(tokens[i + 1], "leads_to"))) {
+            char subject[MAX_TOKEN_LEN];
+            char object[MAX_TOKEN_LEN];
+            canonical_class_token(tokens[i], subject, sizeof(subject));
+            canonical_class_token(tokens[i + 2], object, sizeof(object));
+            patterns_seen++;
+            facts_extracted += add_extracted_fact(model, subject, "causes", object, 1.0f);
+        }
+    }
+
+    return facts_extracted > 0 ? facts_extracted : (patterns_seen > 0 ? -1 : 0);
+}
+
 /* Main fact extraction with hybrid GA-cache approach */
 int extract_facts_with_heuristic_compiler(GalileoModel* model, char tokens[][MAX_TOKEN_LEN], int num_tokens) {
     if (!g_compiler || !g_compiler->db || num_tokens < 3) {
@@ -548,6 +772,21 @@ int extract_facts_with_heuristic_compiler(GalileoModel* model, char tokens[][MAX
 #endif
     
     int facts_extracted = 0;
+
+    facts_extracted = extract_deterministic_facts(model, tokens, num_tokens);
+    if (facts_extracted > 0) {
+        printf("🧬 Deterministic extractor found %d facts; skipping GA fallback\n", facts_extracted);
+#if GALILEO_HAS_PTHREAD
+        pthread_mutex_unlock(&compiler_mutex);
+#endif
+        return facts_extracted;
+    } else if (facts_extracted < 0) {
+        printf("🧬 Deterministic extractor recognized existing facts; skipping GA fallback\n");
+#if GALILEO_HAS_PTHREAD
+        pthread_mutex_unlock(&compiler_mutex);
+#endif
+        return 0;
+    }
     
     /* Generate pattern hash */
     char pattern_hash[MAX_PATTERN_HASH_LEN];

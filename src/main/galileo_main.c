@@ -562,23 +562,110 @@ int process_files(GalileoModel* model, const GalileoOptions* options) {
 }
 
 /* =============================================================================
- * STUB FUNCTIONS FOR FEATURES NOT YET IMPLEMENTED
+ * LOCAL SMOKE TESTS
  * =============================================================================
  */
 
+static int strings_equal_ci(const char* a, const char* b) {
+    if (!a || !b) return 0;
+
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+
+    return *a == '\0' && *b == '\0';
+}
+
+static int model_has_fact(const GalileoModel* model, const char* subject,
+                          const char* relation, const char* object) {
+    if (!model) return 0;
+
+    for (int i = 0; i < model->num_facts; i++) {
+        const SymbolicFact* fact = &model->facts[i];
+        if (strings_equal_ci(fact->subject, subject) &&
+            strings_equal_ci(fact->relation, relation) &&
+            strings_equal_ci(fact->object, object)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void report_test_result(const char* name, int passed, int* failures) {
+    printf("%s %s\n", passed ? "✅" : "❌", name);
+    if (!passed && failures) {
+        (*failures)++;
+    }
+}
+
 /* Run test suite */
 int run_test_suite(GalileoModel* model, const GalileoOptions* options) {
-    (void)model;
-    (void)options;
-    printf("🧪 Test suite functionality not yet implemented\n");
-    printf("🔄 Dynamic loading system is working correctly.\n");
+    if (!model || !options) {
+        return 1;
+    }
+
+    printf("🧪 === Galileo v42 Local Smoke Tests ===\n");
+    int failures = 0;
+    int previous_iterations = model->max_iterations;
+
+    model->max_iterations = 3;
+    char syllogism_tokens[][MAX_TOKEN_LEN] = {
+        "All", "men", "are", "mortal", "Socrates", "is", "a", "man"
+    };
+    galileo_process_sequence(model, syllogism_tokens, 8);
+
+    report_test_result("token occurrences are graph nodes",
+                       model->num_nodes >= 9, &failures);
+    report_test_result("sequence/global graph edges are created",
+                       model->num_edges >= 15, &failures);
+    report_test_result("universal fact extracted",
+                       model_has_fact(model, "man", "subclass_of", "mortal"), &failures);
+    report_test_result("instance fact extracted",
+                       model_has_fact(model, "Socrates", "is_a", "man"), &failures);
+    report_test_result("syllogism inferred",
+                       model_has_fact(model, "Socrates", "is_a", "mortal"), &failures);
+
+    GalileoModel* exception_model = galileo_init();
+    if (!exception_model) {
+        report_test_result("fresh model can be initialized", 0, &failures);
+    } else {
+        exception_model->max_iterations = 2;
+        char exception_tokens[][MAX_TOKEN_LEN] = {
+            "Most", "birds", "can", "fly", "but", "penguins", "and", "ostriches", "cannot"
+        };
+        galileo_process_sequence(exception_model, exception_tokens, 9);
+
+        report_test_result("fresh model starts isolated",
+                           exception_model->num_nodes >= 10 && exception_model->num_facts > 0, &failures);
+        report_test_result("capability fact extracted",
+                           model_has_fact(exception_model, "bird", "can", "fly"), &failures);
+        report_test_result("penguin exception extracted",
+                           model_has_fact(exception_model, "penguin", "cannot", "fly"), &failures);
+        report_test_result("ostrich exception extracted",
+                           model_has_fact(exception_model, "ostrich", "cannot", "fly"), &failures);
+
+        galileo_destroy(exception_model);
+    }
+
+    model->max_iterations = previous_iterations;
     
     if (options->verbose) {
         printf("\n📊 Final module status:\n");
         print_module_status(stdout);
     }
     
-    return 0;
+    if (failures == 0) {
+        printf("✅ All local smoke tests passed.\n");
+        return 0;
+    }
+
+    printf("❌ Local smoke tests failed: %d\n", failures);
+    return 1;
 }
 
 /* Run interactive mode */
